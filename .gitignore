@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Manim rendered output (can be large)
+media/videos/
+media/images/
+
+# macOS
+.DS_Store
