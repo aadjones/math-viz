@@ -6,8 +6,7 @@ __pycache__/
 *.egg-info/
 
 # Manim rendered output (can be large)
-media/videos/
-media/images/
+media/
 
 # macOS
 .DS_Store
