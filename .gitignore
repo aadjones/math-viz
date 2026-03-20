@@ -10,3 +10,7 @@ media/
 
 # macOS
 .DS_Store
+
+# Screenshots and browser automation artifacts
+screenshots/
+.playwright-mcp/
