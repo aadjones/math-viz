@@ -26,11 +26,24 @@ const FX          = TL + TW * 0.68;
 const PIPE_ELBOW_Y = TT - 32;  // y where vertical meets horizontal
 const PIPE_RIGHT_X = TR + 55;  // how far the horizontal pipe extends
 
-// Drain gap at bottom center — dynamic, driven by drain slider
+// Drain gap at bottom center — driven by drain scrubby, modulated by level in non-fixed modes
 const DGAP_MIN = 4, DGAP_MAX = 48;
+const FRAMES_PER_MONTH = 8;  // sim speed — 8 frames = 1 month (~7.5 months/sec)
+// Unified rate range — both faucet and drain use same scale so equal values = equilibrium
+const K_RATE_MIN = 0.01, K_RATE_MAX = 0.15;
+const K_OUT_MIN = K_RATE_MIN, K_OUT_MAX = K_RATE_MAX;
 function dgap() {
-  const s = sliders.drain;
-  return DGAP_MIN + ((s.val - s.min) / (s.max - s.min)) * (DGAP_MAX - DGAP_MIN);
+  const baseGap = DGAP_MIN + ((sim.kOut - K_OUT_MIN) / (K_OUT_MAX - K_OUT_MIN)) * (DGAP_MAX - DGAP_MIN);
+  // Only modulate aperture once the sim is running — config state always shows the set value
+  if (!sim.running) return baseGap;
+  if (sim.mode === 'fixed') return baseGap;
+  if (sim.mode === 'proportional') {
+    return DGAP_MIN + (baseGap - DGAP_MIN) * sim.level;
+  }
+  // floor mode: proportional but never below the floor's fraction of drain rate
+  const floorFrac = Math.min(1, sim.kFloor / sim.kOut);
+  const minGap    = DGAP_MIN + (baseGap - DGAP_MIN) * floorFrac;
+  return Math.max(DGAP_MIN + (baseGap - DGAP_MIN) * sim.level, minGap);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -42,6 +55,7 @@ const C_BASE = '#C9A84C';  // warm gold — original sand
 const C_INT  = '#8B2020';  // deep red  — interest sand
 const C_WALL = '#7A6E60';  // warm gray — tank walls & pipes
 const C_EMPTY= '#DDD5C8';  // slightly tinted empty tank
+const C_DIM  = '#B8B0A8';  // dimmed — locked controls
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SIMULATION
@@ -55,19 +69,29 @@ function makeSim() {
     interestSand: 0.00,
     initialBase:  0.80,
     totalIn:      0,
-    mode:         'fixed',   // 'fixed' | 'proportional' | 'floor'
-    kIn:          0.05,      // faucet: inRate  = kIn  * level
-    kOut:         0.12,      // drain:  outRate = kOut (fixed) | kOut*level (prop)
+    faucetMode:   'constant',      // 'proportional' | 'constant'
+    mode:         'fixed',         // 'fixed' | 'proportional' | 'floor'
+    kIn:          0.05,            // faucet rate coefficient
+    kOut:         0.08,            // drain rate coefficient
     kFloor:       0.025,     // minimum drain rate (floor mode only)
-    running:      true,
+    running:      false,
     done:         false,
+    overflowed:   false,
+    started:      false,   // true once Start is clicked (distinguishes idle from paused)
+    months:       0,
+    frameAccum:   0,       // sub-month frame counter
   };
 }
 
 function stepSim() {
   const dt = 1 / 60;
+  sim.frameAccum++;
+  if (sim.frameAccum >= FRAMES_PER_MONTH) {
+    sim.months++;
+    sim.frameAccum = 0;
+  }
 
-  const inRate = sim.kIn * sim.level;
+  const inRate = sim.faucetMode === 'constant' ? sim.kIn : sim.kIn * sim.level;
 
   let outRate;
   if      (sim.mode === 'fixed')        outRate = sim.kOut;
@@ -96,6 +120,13 @@ function stepSim() {
     sim.done    = true;
   }
 
+  if (sim.level >= 1.0) {
+    sim.level = 1.0;
+    sim.running    = false;
+    sim.overflowed = true;
+    sim.done       = true;
+  }
+
   spawnFaucet(inRate);
   spawnDrain(outRate);
 }
@@ -105,6 +136,12 @@ function stepSim() {
 // ═══════════════════════════════════════════════════════════════════════════
 let fParts = [];  // faucet: red, fall into tank
 let dParts = [];  // drain:  fall away below
+
+function stepMonth() {
+  for (let i = 0; i < FRAMES_PER_MONTH; i++) {
+    if (!sim.done) { stepSim(); stepParticles(); }
+  }
+}
 
 function spawnFaucet(rate) {
   const n = Math.floor(rate * 280 + random());
@@ -180,18 +217,44 @@ function drawTank() {
   line(TCX + dgap() / 2, TB, TR, TB);           // bottom-right segment
 }
 
-function drawFaucetPipe() {
-  stroke(C_WALL); strokeWeight(3);
-  line(FX, PIPE_ELBOW_Y, FX, TT);               // vertical drop into tank
-  line(FX, PIPE_ELBOW_Y, PIPE_RIGHT_X, PIPE_ELBOW_Y);  // horizontal arm
+function faucetWeight() {
+  const base = map(scrubbies.faucet.val, 1, 10, 2, 14);
+  if (!sim.running || sim.faucetMode === 'constant') return base;
+  return Math.max(base * sim.level, 0.5);
+}
 
-  // Spout cap
-  fill(C_WALL); noStroke();
-  rect(FX - 5, PIPE_ELBOW_Y, 10, 7, 2);
+function faucetColor() {
+  if (!sim.running || sim.faucetMode === 'constant') return color(C_WALL);
+  return lerpColor(color(C_DIM), color(C_WALL), sim.level);
+}
+
+function drainWeight() {
+  const base = map(scrubbies.drain.val, 1, 10, 2, 8);
+  if (!sim.running) return base;
+  if (sim.mode === 'fixed') return base;
+  const floorFrac = (sim.mode === 'floor') ? Math.min(1, sim.kFloor / sim.kOut) : 0;
+  return Math.max(base * Math.max(sim.level, floorFrac), 1);
+}
+
+function drawFaucetPipe() {
+  const w   = faucetWeight();
+  const col = faucetColor();
+  stroke(col); strokeWeight(w);
+  line(FX, PIPE_ELBOW_Y, FX, TT);
+  line(FX, PIPE_ELBOW_Y, PIPE_RIGHT_X, PIPE_ELBOW_Y);
+
+  // Spout cap scales with pipe weight
+  fill(col); noStroke();
+  rect(FX - w / 2 - 1, PIPE_ELBOW_Y, w + 2, w + 3, 2);
+}
+
+function atFloor() {
+  return sim.mode === 'floor' && sim.kOut * sim.level <= sim.kFloor;
 }
 
 function drawDrainPipe() {
-  stroke(C_WALL); strokeWeight(3);
+  const pipeCol = atFloor() ? C_INT : C_WALL;
+  stroke(pipeCol); strokeWeight(drainWeight());
   line(TCX - dgap() / 2, TB, TCX - dgap() / 2, TB + 28);
   line(TCX + dgap() / 2, TB, TCX + dgap() / 2, TB + 28);
 }
@@ -206,85 +269,212 @@ function drawParticles() {
 // ═══════════════════════════════════════════════════════════════════════════
 // DRAWING — CONTROLS
 // ═══════════════════════════════════════════════════════════════════════════
-const MODE_BTNS = [
-  { id: 'fixed',        label: 'fixed' },
-  { id: 'proportional', label: 'proportional' },
-  { id: 'floor',        label: 'prop. + floor' },
-];
-
-// Custom sliders (drawn in p5, no DOM elements)
-const sliders = {
-  faucet: { x: TL + 70, y: TB + 108, w: 160, min: 0.01, max: 0.12, val: 0.05, label: 'faucet' },
-  drain:  { x: TL + 70, y: TB + 140, w: 160, min: 0.01, max: 0.20, val: 0.12, label: 'drain'  },
+// Scrubby number inputs — drag horizontally to change, 1-10 scale
+// Both use the same rate range so equal values produce equilibrium in matching modes
+const scrubbies = {
+  faucet: { x: PIPE_RIGHT_X + 20, y: PIPE_ELBOW_Y,      val: 5, min: 1, max: 10, label: 'inflow start',  kMin: K_RATE_MIN, kMax: K_RATE_MAX },
+  drain:  { x: TR + 22,           y: TB + 14,            val: 5, min: 1, max: 10, label: 'drain start', kMin: K_RATE_MIN, kMax: K_RATE_MAX },
 };
-let dragging = null;
+let scrubbing = null, scrubStartX = 0, scrubStartVal = 0;
 
-function drawSlider(s) {
-  // Track
-  stroke(C_WALL); strokeWeight(2);
-  line(s.x, s.y, s.x + s.w, s.y);
+function scrubToK(s) { return map(s.val, s.min, s.max, s.kMin, s.kMax); }
 
-  const frac  = (s.val - s.min) / (s.max - s.min);
-  const thumbX = s.x + frac * s.w;
+function drawScrubby(s, locked) {
+  const ink  = locked ? C_DIM : INK;
+  const cfg  = !locked;
+  const bw = 44, bh = 22;
+  const bx = s.x - bw / 2, by = s.y - bh / 2;
 
-  // Thumb
-  fill(INK); noStroke();
-  ellipse(thumbX, s.y, 14);
+  // Box
+  stroke(ink); strokeWeight(1.2); fill(BG);
+  rect(bx, by, bw, bh, 3);
 
-  // Label
-  fill(INK); noStroke();
-  textFont('Courier New'); textSize(11);
-  textAlign(RIGHT, CENTER);
-  text(s.label, s.x - 8, s.y);
-}
-
-let playBtn = {}, resetBtn = {};
-
-function drawControls() {
-  const cy = TB + 45;
-
-  // ── Drain mode ──
-  fill(INK); noStroke();
-  textFont('Courier New'); textSize(11);
-  textAlign(LEFT, CENTER);
-  text('drain:', TL, cy + 12);
-
-  const bw = 88, bh = 24, gap = 6;
-  let bx = TL + 50;
-  for (const btn of MODE_BTNS) {
-    const on = sim.mode === btn.id;
-    stroke(INK); strokeWeight(1.5);
-    fill(on ? INK : BG);
-    rect(bx, cy, bw, bh, 3);
-    noStroke();
-    fill(on ? BG : INK);
-    textAlign(CENTER, CENTER); textSize(10);
-    text(btn.label, bx + bw / 2, cy + bh / 2);
-    btn._x = bx; btn._y = cy; btn._w = bw; btn._h = bh;
-    bx += bw + gap;
+  // Arrows hint (config only)
+  fill(ink); noStroke();
+  textFont('Courier New'); textSize(9); textAlign(CENTER, CENTER);
+  if (cfg) {
+    text('◀', bx + 7,      s.y);
+    text('▶', bx + bw - 7, s.y);
   }
 
-  // ── Sliders ──
-  drawSlider(sliders.faucet);
-  drawSlider(sliders.drain);
+  // Value
+  textSize(12); textAlign(CENTER, CENTER);
+  text(s.val, s.x, s.y);
 
-  // ── Play / Reset ──
-  const ay = TB + 172;
-  const bw2 = 65, bh2 = 26;
+  // Label below
+  textSize(9); textAlign(CENTER, TOP);
+  text(s.label, s.x, by + bh + 3);
 
+  // Store hit area
+  s._x = bx; s._y = by; s._w = bw; s._h = bh;
+}
+
+const FAUCET_MODE_BTNS = [
+  { id: 'constant',     label: 'fixed' },
+  { id: 'proportional', label: 'prop.' },
+];
+const DRAIN_MODE_BTNS = [
+  { id: 'fixed',        label: 'fixed' },
+  { id: 'proportional', label: 'prop.' },
+  { id: 'floor',        label: 'floor' },
+];
+
+function drawModeToggle(btns, activeId, cx, y, locked) {
+  const bw = 46, bh = 18, gap = 4;
+  const totalW = btns.length * bw + (btns.length - 1) * gap;
+  let bx = cx - totalW / 2;
+  const ink = locked ? C_DIM : INK;
+  for (const btn of btns) {
+    const on = activeId === btn.id;
+    stroke(ink); strokeWeight(1);
+    fill(on ? ink : BG);
+    rect(bx, y, bw, bh, 2);
+    noStroke(); fill(on ? BG : ink);
+    textFont('Courier New'); textAlign(CENTER, CENTER); textSize(9);
+    text(btn.label, bx + bw / 2, y + bh / 2);
+    btn._x = bx; btn._y = y; btn._w = bw; btn._h = bh;
+    bx += bw + gap;
+  }
+}
+
+function drawScrubbies() {
+  const locked = !configActive();
+  drawScrubby(scrubbies.faucet, locked);
+  drawModeToggle(FAUCET_MODE_BTNS, sim.faucetMode, scrubbies.faucet.x, PIPE_ELBOW_Y + 26, locked);
+  drawScrubby(scrubbies.drain, locked);
+  drawModeToggle(DRAIN_MODE_BTNS, sim.mode, scrubbies.drain.x, TB + 38, locked);
+}
+
+let startBtn = {}, pauseBtn = {}, resumeBtn = {}, stepBtn = {}, resetBtn = {};
+
+function drawBtn(label, x, y, w, h) {
   stroke(INK); strokeWeight(1.5); fill(BG);
-  rect(TL, ay, bw2, bh2, 3);
+  rect(x, y, w, h, 3);
   noStroke(); fill(INK);
-  textAlign(CENTER, CENTER); textSize(11);
-  text(sim.running ? 'pause' : 'play', TL + bw2 / 2, ay + bh2 / 2);
-  playBtn = { _x: TL, _y: ay, _w: bw2, _h: bh2 };
+  textFont('Courier New'); textAlign(CENTER, CENTER); textSize(11);
+  text(label, x + w / 2, y + h / 2);
+  return { _x: x, _y: y, _w: w, _h: h };
+}
 
-  stroke(INK); strokeWeight(1.5); fill(BG);
-  rect(TL + bw2 + 10, ay, bw2, bh2, 3);
-  noStroke(); fill(INK);
-  textAlign(CENTER, CENTER); textSize(11);
-  text('reset', TL + bw2 + 10 + bw2 / 2, ay + bh2 / 2);
-  resetBtn = { _x: TL + bw2 + 10, _y: ay, _w: bw2, _h: bh2 };
+function drawControls() {
+  const bw = 65, bh = 26, gap = 10;
+  const ay = TB + 100;
+
+  // Clear all buttons each frame
+  startBtn = {}; pauseBtn = {}; resumeBtn = {}; stepBtn = {};
+
+  if (configActive()) {
+    // Idle: [start] [reset]
+    const ox = TCX - bw - gap / 2;
+    startBtn = drawBtn('start',  ox,          ay, bw, bh);
+    resetBtn  = drawBtn('reset', ox + bw + gap, ay, bw, bh);
+  } else if (sim.running) {
+    // Running: [pause] [reset]
+    const ox = TCX - bw - gap / 2;
+    pauseBtn = drawBtn('pause',  ox,          ay, bw, bh);
+    resetBtn  = drawBtn('reset', ox + bw + gap, ay, bw, bh);
+  } else if (isPaused()) {
+    // Paused: [resume] [step] [reset]
+    const totalW = bw * 3 + gap * 2;
+    const ox = TCX - totalW / 2;
+    resumeBtn = drawBtn('resume', ox,              ay, bw, bh);
+    stepBtn   = drawBtn('+1 mo',  ox + bw + gap,   ay, bw, bh);
+    resetBtn  = drawBtn('reset',  ox + (bw + gap) * 2, ay, bw, bh);
+  } else {
+    // Done: [reset] centered
+    resetBtn = drawBtn('reset', TCX - bw / 2, ay, bw, bh);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAWING — LIVE READOUTS
+// ═══════════════════════════════════════════════════════════════════════════
+function drawRateBar(label, frac, x, y, barW, floorFrac) {
+  const atFloorMark = floorFrac !== undefined && frac <= floorFrac + 0.01;
+  const barCol = atFloorMark ? color(C_INT) : color(INK);
+
+  fill(INK); noStroke();
+  textFont('Courier New'); textSize(9); textAlign(RIGHT, CENTER);
+  text(label, x - 4, y);
+
+  // Track
+  stroke(C_DIM); strokeWeight(1); noFill();
+  rect(x, y - 4, barW, 8, 2);
+
+  // Floor tick mark (floor mode only)
+  if (floorFrac !== undefined) {
+    const tickX = x + floorFrac * barW;
+    stroke(C_INT); strokeWeight(1.5);
+    line(tickX, y - 7, tickX, y + 7);
+  }
+
+  // Fill — turns red when at floor
+  if (frac > 0.001) {
+    fill(barCol); noStroke();
+    rect(x + 1, y - 3, max(1, (barW - 2) * frac), 6, 1);
+  }
+
+  // Percentage
+  fill(barCol); noStroke();
+  textSize(9); textAlign(LEFT, CENTER);
+  text(nf(round(frac * 100), 1) + '%', x + barW + 5, y);
+}
+
+function drawReadouts() {
+  if (!sim.started) return;
+
+  const liveIn  = sim.faucetMode === 'constant'
+    ? 1.0
+    : sim.level;  // fraction of max inflow currently flowing
+
+  const liveOut = sim.mode === 'fixed'
+    ? 1.0
+    : sim.mode === 'proportional'
+      ? sim.level
+      : Math.max(sim.level, Math.min(1, sim.kFloor / sim.kOut));
+
+  const rx = 72, ry = TB + 28, barW = 100;
+
+  // Month counter
+  fill(INK); noStroke();
+  textFont('Courier New'); textSize(11); textAlign(LEFT, BASELINE);
+  text('month ' + sim.months, rx - 45, ry - 8);
+
+  // "now:" header frames the bars as live readouts
+  fill(C_DIM); noStroke();
+  textSize(9); textAlign(LEFT, BASELINE);
+  text('now:', rx - 45, ry + 10);
+
+  const floorMark = sim.mode === 'floor'
+    ? Math.min(1, sim.kFloor / sim.kOut)
+    : undefined;
+
+  drawRateBar('inflow', liveIn,  rx, ry + 18, barW);
+  drawRateBar('drain',  liveOut, rx, ry + 36, barW, floorMark);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAWING — OVERFLOW (game over)
+// ═══════════════════════════════════════════════════════════════════════════
+function drawOverflow() {
+  const ox = TL + 14, oy = TT + TH * 0.18;
+  const ow = TW - 28, oh = TH * 0.50;
+
+  fill(245, 240, 232, 240); noStroke();
+  rect(ox, oy, ow, oh, 6);
+
+  fill(C_INT); noStroke();
+  textFont('Courier New'); textAlign(CENTER, CENTER);
+  textSize(16);
+  text('GAME OVER', ox + ow / 2, oy + 30);
+
+  fill(INK); textSize(10);
+  text('the interest wins this round.', ox + ow / 2, oy + 54);
+
+  textSize(9);
+  text('in theory, this goes on forever —', ox + ow / 2, oy + 80);
+  text('your debt grows faster than', ox + ow / 2, oy + 95);
+  text('you can ever pay it down.', ox + ow / 2, oy + 110);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -300,7 +490,9 @@ function drawSummary() {
   fill(INK); noStroke();
   textFont('Courier New');
   textAlign(CENTER, CENTER); textSize(12);
-  text('all drained!', ox + ow / 2, oy + 26);
+  text('all drained!', ox + ow / 2, oy + 20);
+  textSize(10);
+  text(sim.months + ' months', ox + ow / 2, oy + 36);
 
   const total    = sim.initialBase + sim.totalIn;
   const baseFrac = total > 0 ? sim.initialBase / total : 1;
@@ -329,12 +521,17 @@ function setup() {
   sim = makeSim();
 }
 
+function configActive() { return !sim.started; }
+function isPaused()     { return sim.started && !sim.running && !sim.done; }
+
 function draw() {
   background(BG);
 
-  // Push slider values into sim each frame
-  sim.kIn  = sliders.faucet.val;
-  sim.kOut = sliders.drain.val;
+  // Only update sim params from scrubbies during config (pre-run)
+  if (configActive()) {
+    sim.kIn  = scrubToK(scrubbies.faucet);
+    sim.kOut = scrubToK(scrubbies.drain);
+  }
 
   if (sim.running) {
     stepSim();
@@ -345,8 +542,11 @@ function draw() {
   drawDrainPipe();
   drawTank();
   drawParticles();
+  drawScrubbies();
+  drawReadouts();
   drawControls();
-  if (sim.done) drawSummary();
+  if (sim.done && sim.overflowed)  drawOverflow();
+  if (sim.done && !sim.overflowed) drawSummary();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -358,43 +558,76 @@ function inBtn(b) {
     mouseY > b._y && mouseY < b._y + b._h;
 }
 
-function sliderThumbX(s) {
-  return s.x + ((s.val - s.min) / (s.max - s.min)) * s.w;
+function inScrubby(s) {
+  return s._x !== undefined &&
+    mouseX > s._x && mouseX < s._x + s._w &&
+    mouseY > s._y && mouseY < s._y + s._h;
+}
+
+function clampScrubVal(s, val) {
+  val = constrain(val, s.min, s.max);
+  if (s === scrubbies.drain && sim.mode === 'floor') {
+    const floorVal = Math.ceil(map(sim.kFloor, s.kMin, s.kMax, s.min, s.max));
+    val = Math.max(val, floorVal);
+  }
+  return val;
 }
 
 function mousePressed() {
-  // Slider grab
-  for (const s of Object.values(sliders)) {
-    if (dist(mouseX, mouseY, sliderThumbX(s), s.y) < 12) {
-      dragging = s;
-      return;
+  if (configActive()) {
+    // Scrubby click (arrows) or grab (drag)
+    for (const s of Object.values(scrubbies)) {
+      if (inScrubby(s)) {
+        const relX = mouseX - s._x;
+        if (relX < 16) {
+          s.val = clampScrubVal(s, s.val - 1);
+        } else if (relX > s._w - 16) {
+          s.val = clampScrubVal(s, s.val + 1);
+        } else {
+          scrubbing = s; scrubStartX = mouseX; scrubStartVal = s.val;
+        }
+        return;
+      }
     }
+    for (const btn of FAUCET_MODE_BTNS) {
+      if (inBtn(btn)) { sim.faucetMode = btn.id; return; }
+    }
+    for (const btn of DRAIN_MODE_BTNS) {
+      if (inBtn(btn)) { sim.mode = btn.id; return; }
+    }
+    if (inBtn(startBtn)) { sim.started = true; sim.running = true; return; }
   }
 
-  // Mode buttons
-  for (const btn of MODE_BTNS) {
-    if (inBtn(btn)) { sim.mode = btn.id; return; }
+  // Running — pause
+  if (sim.running && inBtn(pauseBtn)) { sim.running = false; return; }
+
+  // Paused mid-sim — resume or step
+  if (isPaused()) {
+    if (inBtn(resumeBtn)) { sim.running = true; return; }
+    if (inBtn(stepBtn))   { stepMonth(); return; }
   }
 
-  // Play / Reset
-  if (inBtn(playBtn)  && !sim.done) { sim.running = !sim.running; return; }
+  // Reset always available — preserve mode selections and scrubby values
   if (inBtn(resetBtn)) {
+    const prevFaucetMode = sim.faucetMode;
+    const prevMode       = sim.mode;
     sim = makeSim();
-    sim.kIn  = sliders.faucet.val;
-    sim.kOut = sliders.drain.val;
+    sim.faucetMode = prevFaucetMode;
+    sim.mode       = prevMode;
+    sim.kIn        = scrubToK(scrubbies.faucet);
+    sim.kOut       = scrubToK(scrubbies.drain);
     fParts = []; dParts = [];
   }
 }
 
 function mouseDragged() {
-  if (!dragging) return;
-  const s = dragging;
-  const frac = constrain((mouseX - s.x) / s.w, 0, 1);
-  s.val = s.min + frac * (s.max - s.min);
+  if (!scrubbing || !configActive()) return;
+  const dx = mouseX - scrubStartX;
+  scrubbing.val = clampScrubVal(scrubbing, round(scrubStartVal + dx / 10));
 }
 
 function mouseReleased() {
-  dragging = null;
+  scrubbing = null;
 }
 </script>
 </body>
