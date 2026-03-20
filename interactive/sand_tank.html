@@ -14,7 +14,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // LAYOUT
 // ═══════════════════════════════════════════════════════════════════════════
-const W = 500, H = 660;
+const W = 560, H = 660;
 
 const TL = 150, TT = 90, TW = 200, TH = 320;
 const TR  = TL + TW;
@@ -64,10 +64,10 @@ let sim;
 
 function makeSim() {
   return {
-    level:        0.80,
-    baseSand:     0.80,
+    level:        0.60,
+    baseSand:     0.60,
     interestSand: 0.00,
-    initialBase:  0.80,
+    initialBase:  0.60,
     totalIn:      0,
     faucetMode:   'constant',      // 'proportional' | 'constant'
     mode:         'fixed',         // 'fixed' | 'proportional' | 'floor'
@@ -272,17 +272,17 @@ function drawParticles() {
 // Scrubby number inputs — drag horizontally to change, 1-10 scale
 // Both use the same rate range so equal values produce equilibrium in matching modes
 const scrubbies = {
-  faucet: { x: PIPE_RIGHT_X + 20, y: PIPE_ELBOW_Y,      val: 5, min: 1, max: 10, label: 'inflow start',  kMin: K_RATE_MIN, kMax: K_RATE_MAX },
-  drain:  { x: TR + 22,           y: TB + 14,            val: 5, min: 1, max: 10, label: 'drain start', kMin: K_RATE_MIN, kMax: K_RATE_MAX },
+  faucet: { x: 0, y: 0, val: 4, min: 1, max: 10, kMin: K_RATE_MIN, kMax: K_RATE_MAX },
+  drain:  { x: 0, y: 0, val: 7, min: 1, max: 10, kMin: K_RATE_MIN, kMax: K_RATE_MAX },
 };
 let scrubbing = null, scrubStartX = 0, scrubStartVal = 0;
+let hoveredTooltip = null;
 
 function scrubToK(s) { return map(s.val, s.min, s.max, s.kMin, s.kMax); }
 
 function drawScrubby(s, locked) {
-  const ink  = locked ? C_DIM : INK;
-  const cfg  = !locked;
-  const bw = 44, bh = 22;
+  const ink = locked ? C_DIM : INK;
+  const bw = 52, bh = 22;
   const bx = s.x - bw / 2, by = s.y - bh / 2;
 
   // Box
@@ -292,37 +292,36 @@ function drawScrubby(s, locked) {
   // Arrows hint (config only)
   fill(ink); noStroke();
   textFont('Courier New'); textSize(9); textAlign(CENTER, CENTER);
-  if (cfg) {
-    text('◀', bx + 7,      s.y);
-    text('▶', bx + bw - 7, s.y);
+  if (!locked) {
+    text('◀', bx + 8,      s.y);
+    text('▶', bx + bw - 8, s.y);
   }
 
-  // Value
-  textSize(12); textAlign(CENTER, CENTER);
-  text(s.val, s.x, s.y);
-
-  // Label below
-  textSize(9); textAlign(CENTER, TOP);
-  text(s.label, s.x, by + bh + 3);
+  // Value as "4/10"
+  textSize(11); textAlign(CENTER, CENTER);
+  text(s.val + '/' + s.max, s.x, s.y);
 
   // Store hit area
   s._x = bx; s._y = by; s._w = bw; s._h = bh;
 }
 
 const FAUCET_MODE_BTNS = [
-  { id: 'constant',     label: 'fixed' },
-  { id: 'proportional', label: 'prop.' },
+  { id: 'constant',     label: 'steady', tip: 'constant — same every step' },
+  { id: 'proportional', label: 'scaled', tip: 'proportional to level' },
 ];
 const DRAIN_MODE_BTNS = [
-  { id: 'fixed',        label: 'fixed' },
-  { id: 'proportional', label: 'prop.' },
-  { id: 'floor',        label: 'floor' },
+  { id: 'fixed',        label: 'steady', tip: 'constant — same every step' },
+  { id: 'proportional', label: 'scaled', tip: 'proportional to level' },
+  { id: 'floor',        label: 'floor',  tip: 'proportional, with a minimum' },
 ];
 
-function drawModeToggle(btns, activeId, cx, y, locked) {
+// GX: left edge of both control groups; LABEL_W: space for "rate:" / "mode:" prefix
+const GX = TR + 12;
+const LABEL_W = 42;
+
+// bx is the LEFT edge of the first button (not center)
+function drawModeToggle(btns, activeId, bx, y, locked) {
   const bw = 46, bh = 18, gap = 4;
-  const totalW = btns.length * bw + (btns.length - 1) * gap;
-  let bx = cx - totalW / 2;
   const ink = locked ? C_DIM : INK;
   for (const btn of btns) {
     const on = activeId === btn.id;
@@ -333,16 +332,59 @@ function drawModeToggle(btns, activeId, cx, y, locked) {
     textFont('Courier New'); textAlign(CENTER, CENTER); textSize(9);
     text(btn.label, bx + bw / 2, y + bh / 2);
     btn._x = bx; btn._y = y; btn._w = bw; btn._h = bh;
+    // Track hover for tooltip
+    if (btn.tip && mouseX > bx && mouseX < bx + bw && mouseY > y && mouseY < y + bh) {
+      hoveredTooltip = { text: btn.tip, x: bx + bw / 2, y: y + bh };
+    }
     bx += bw + gap;
   }
 }
 
+function drawControlGroup(title, scrubby, modeBtns, activeMode, gy, locked) {
+  const ink = locked ? C_DIM : INK;
+
+  // Title
+  fill(ink); noStroke();
+  textFont('Courier New'); textSize(10); textAlign(LEFT, TOP);
+  text(title, GX, gy);
+
+  // Rate row — scrubby center aligned to label midpoint
+  const rateY = gy + 18;
+  fill(ink); textSize(9); textAlign(LEFT, CENTER);
+  text('rate:', GX, rateY + 11);
+  scrubby.x = GX + LABEL_W + 26;   // box is 52px wide → half = 26
+  scrubby.y = rateY + 11;
+  drawScrubby(scrubby, locked);
+
+  // Mode row
+  const modeY = rateY + 26;
+  fill(ink); textSize(9); textAlign(LEFT, CENTER);
+  text('mode:', GX, modeY + 9);
+  drawModeToggle(modeBtns, activeMode, GX + LABEL_W, modeY, locked);
+}
+
+function drawTooltip() {
+  if (!hoveredTooltip) return;
+  const pad = 6;
+  textFont('Courier New'); textSize(8);
+  const tw = textWidth(hoveredTooltip.text) + pad * 2;
+  const th = 16;
+  let tx = hoveredTooltip.x - tw / 2;
+  let ty = hoveredTooltip.y + 4;
+  tx = constrain(tx, 4, W - tw - 4);
+  fill(INK); noStroke();
+  rect(tx, ty, tw, th, 2);
+  fill(BG); noStroke();
+  textAlign(LEFT, CENTER);
+  text(hoveredTooltip.text, tx + pad, ty + th / 2);
+}
+
 function drawScrubbies() {
   const locked = !configActive();
-  drawScrubby(scrubbies.faucet, locked);
-  drawModeToggle(FAUCET_MODE_BTNS, sim.faucetMode, scrubbies.faucet.x, PIPE_ELBOW_Y + 26, locked);
-  drawScrubby(scrubbies.drain, locked);
-  drawModeToggle(DRAIN_MODE_BTNS, sim.mode, scrubbies.drain.x, TB + 38, locked);
+  drawControlGroup('Inflow', scrubbies.faucet, FAUCET_MODE_BTNS, sim.faucetMode,
+    PIPE_ELBOW_Y - 29, locked);
+  drawControlGroup('Drain',  scrubbies.drain,  DRAIN_MODE_BTNS,  sim.mode,
+    TB + 8, locked);
 }
 
 let startBtn = {}, pauseBtn = {}, resumeBtn = {}, stepBtn = {}, resetBtn = {};
@@ -526,6 +568,7 @@ function isPaused()     { return sim.started && !sim.running && !sim.done; }
 
 function draw() {
   background(BG);
+  hoveredTooltip = null;
 
   // Only update sim params from scrubbies during config (pre-run)
   if (configActive()) {
@@ -547,6 +590,7 @@ function draw() {
   drawControls();
   if (sim.done && sim.overflowed)  drawOverflow();
   if (sim.done && !sim.overflowed) drawSummary();
+  drawTooltip();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
