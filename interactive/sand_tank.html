@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sand Tank</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #F5F0E8; display: flex; justify-content: center; padding: 20px; }
+  </style>
+</head>
+<body>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// LAYOUT
+// ═══════════════════════════════════════════════════════════════════════════
+const W = 500, H = 660;
+
+const TL = 150, TT = 90, TW = 200, TH = 320;
+const TR  = TL + TW;
+const TB  = TT + TH;
+const TCX = TL + TW / 2;
+
+// Faucet pours in at FX (inside tank, right-ish)
+const FX          = TL + TW * 0.68;
+const PIPE_ELBOW_Y = TT - 32;  // y where vertical meets horizontal
+const PIPE_RIGHT_X = TR + 55;  // how far the horizontal pipe extends
+
+// Drain gap at bottom center — dynamic, driven by drain slider
+const DGAP_MIN = 4, DGAP_MAX = 48;
+function dgap() {
+  const s = sliders.drain;
+  return DGAP_MIN + ((s.val - s.min) / (s.max - s.min)) * (DGAP_MAX - DGAP_MIN);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COLORS
+// ═══════════════════════════════════════════════════════════════════════════
+const BG     = '#F5F0E8';
+const INK    = '#1A1A1A';
+const C_BASE = '#C9A84C';  // warm gold — original sand
+const C_INT  = '#8B2020';  // deep red  — interest sand
+const C_WALL = '#7A6E60';  // warm gray — tank walls & pipes
+const C_EMPTY= '#DDD5C8';  // slightly tinted empty tank
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIMULATION
+// ═══════════════════════════════════════════════════════════════════════════
+let sim;
+
+function makeSim() {
+  return {
+    level:        0.80,
+    baseSand:     0.80,
+    interestSand: 0.00,
+    initialBase:  0.80,
+    totalIn:      0,
+    mode:         'fixed',   // 'fixed' | 'proportional' | 'floor'
+    kIn:          0.05,      // faucet: inRate  = kIn  * level
+    kOut:         0.12,      // drain:  outRate = kOut (fixed) | kOut*level (prop)
+    kFloor:       0.025,     // minimum drain rate (floor mode only)
+    running:      true,
+    done:         false,
+  };
+}
+
+function stepSim() {
+  const dt = 1 / 60;
+
+  const inRate = sim.kIn * sim.level;
+
+  let outRate;
+  if      (sim.mode === 'fixed')        outRate = sim.kOut;
+  else if (sim.mode === 'proportional') outRate = sim.kOut * sim.level;
+  else                                  outRate = Math.max(sim.kOut * sim.level, sim.kFloor);
+
+  const dIn  = inRate  * dt;
+  const dOut = Math.min(outRate * dt, sim.level);
+
+  // Interest sand arrives on top
+  sim.interestSand += dIn;
+  sim.totalIn      += dIn;
+
+  // Drain from bottom: base sand drains first, then interest
+  let toDrain       = dOut;
+  const fromBase    = Math.min(toDrain, sim.baseSand);
+  sim.baseSand     -= fromBase;
+  toDrain          -= fromBase;
+  sim.interestSand  = Math.max(0, sim.interestSand - toDrain);
+
+  sim.level = sim.baseSand + sim.interestSand;
+
+  if (sim.level <= 0.002) {
+    sim.level = sim.baseSand = sim.interestSand = 0;
+    sim.running = false;
+    sim.done    = true;
+  }
+
+  spawnFaucet(inRate);
+  spawnDrain(outRate);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PARTICLES
+// ═══════════════════════════════════════════════════════════════════════════
+let fParts = [];  // faucet: red, fall into tank
+let dParts = [];  // drain:  fall away below
+
+function spawnFaucet(rate) {
+  const n = Math.floor(rate * 280 + random());
+  for (let i = 0; i < n; i++) {
+    fParts.push({
+      x:  FX + random(-5, 5),
+      y:  PIPE_ELBOW_Y + 6,
+      vy: random(1.5, 3.5),
+      r:  random(2.5, 4),
+    });
+  }
+}
+
+function spawnDrain(rate) {
+  const n = Math.floor(rate * 220 + random());
+  for (let i = 0; i < n; i++) {
+    dParts.push({
+      x:   TCX + random(-dgap() / 2, dgap() / 2),
+      y:   TB + 3,
+      vy:  random(2, 5),
+      r:   random(2, 3.5),
+      col: sim.baseSand > 0.001 ? C_BASE : C_INT,
+    });
+  }
+}
+
+function stepParticles() {
+  const sandTopY = TB - sim.level * TH;
+
+  // Faucet particles dissolve into sand when they reach the surface
+  fParts = fParts.filter(p => {
+    p.vy += 0.18;
+    p.y  += p.vy;
+    return p.y < sandTopY;
+  });
+
+  // Drain particles fall off screen
+  dParts = dParts.filter(p => {
+    p.vy += 0.22;
+    p.y  += p.vy;
+    return p.y < H + 20;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAWING — TANK
+// ═══════════════════════════════════════════════════════════════════════════
+function drawTank() {
+  const sandTopY  = TB - sim.level    * TH;  // top of all sand
+  const baseTopY  = TB - sim.baseSand * TH;  // top of base layer = bottom of interest
+
+  // Empty interior
+  fill(C_EMPTY); noStroke();
+  rect(TL, TT, TW, TH);
+
+  // Base sand (bottom)
+  if (sim.baseSand > 0.001) {
+    fill(C_BASE);
+    rect(TL, baseTopY, TW, TB - baseTopY);
+  }
+
+  // Interest sand (top layer)
+  if (sim.interestSand > 0.001) {
+    fill(C_INT);
+    rect(TL, sandTopY, TW, baseTopY - sandTopY);
+  }
+
+  // Walls — drawn over sand so edges are clean
+  stroke(C_WALL); strokeWeight(3); noFill();
+  line(TL, TT, TL, TB);                          // left
+  line(TR, TT, TR, TB);                          // right
+  line(TL, TB, TCX - dgap() / 2, TB);           // bottom-left segment
+  line(TCX + dgap() / 2, TB, TR, TB);           // bottom-right segment
+}
+
+function drawFaucetPipe() {
+  stroke(C_WALL); strokeWeight(3);
+  line(FX, PIPE_ELBOW_Y, FX, TT);               // vertical drop into tank
+  line(FX, PIPE_ELBOW_Y, PIPE_RIGHT_X, PIPE_ELBOW_Y);  // horizontal arm
+
+  // Spout cap
+  fill(C_WALL); noStroke();
+  rect(FX - 5, PIPE_ELBOW_Y, 10, 7, 2);
+}
+
+function drawDrainPipe() {
+  stroke(C_WALL); strokeWeight(3);
+  line(TCX - dgap() / 2, TB, TCX - dgap() / 2, TB + 28);
+  line(TCX + dgap() / 2, TB, TCX + dgap() / 2, TB + 28);
+}
+
+function drawParticles() {
+  noStroke();
+  fill(C_INT);
+  for (const p of fParts) ellipse(p.x, p.y, p.r * 2);
+  for (const p of dParts) { fill(p.col); ellipse(p.x, p.y, p.r * 2); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAWING — CONTROLS
+// ═══════════════════════════════════════════════════════════════════════════
+const MODE_BTNS = [
+  { id: 'fixed',        label: 'fixed' },
+  { id: 'proportional', label: 'proportional' },
+  { id: 'floor',        label: 'prop. + floor' },
+];
+
+// Custom sliders (drawn in p5, no DOM elements)
+const sliders = {
+  faucet: { x: TL + 70, y: TB + 108, w: 160, min: 0.01, max: 0.12, val: 0.05, label: 'faucet' },
+  drain:  { x: TL + 70, y: TB + 140, w: 160, min: 0.01, max: 0.20, val: 0.12, label: 'drain'  },
+};
+let dragging = null;
+
+function drawSlider(s) {
+  // Track
+  stroke(C_WALL); strokeWeight(2);
+  line(s.x, s.y, s.x + s.w, s.y);
+
+  const frac  = (s.val - s.min) / (s.max - s.min);
+  const thumbX = s.x + frac * s.w;
+
+  // Thumb
+  fill(INK); noStroke();
+  ellipse(thumbX, s.y, 14);
+
+  // Label
+  fill(INK); noStroke();
+  textFont('Courier New'); textSize(11);
+  textAlign(RIGHT, CENTER);
+  text(s.label, s.x - 8, s.y);
+}
+
+let playBtn = {}, resetBtn = {};
+
+function drawControls() {
+  const cy = TB + 45;
+
+  // ── Drain mode ──
+  fill(INK); noStroke();
+  textFont('Courier New'); textSize(11);
+  textAlign(LEFT, CENTER);
+  text('drain:', TL, cy + 12);
+
+  const bw = 88, bh = 24, gap = 6;
+  let bx = TL + 50;
+  for (const btn of MODE_BTNS) {
+    const on = sim.mode === btn.id;
+    stroke(INK); strokeWeight(1.5);
+    fill(on ? INK : BG);
+    rect(bx, cy, bw, bh, 3);
+    noStroke();
+    fill(on ? BG : INK);
+    textAlign(CENTER, CENTER); textSize(10);
+    text(btn.label, bx + bw / 2, cy + bh / 2);
+    btn._x = bx; btn._y = cy; btn._w = bw; btn._h = bh;
+    bx += bw + gap;
+  }
+
+  // ── Sliders ──
+  drawSlider(sliders.faucet);
+  drawSlider(sliders.drain);
+
+  // ── Play / Reset ──
+  const ay = TB + 172;
+  const bw2 = 65, bh2 = 26;
+
+  stroke(INK); strokeWeight(1.5); fill(BG);
+  rect(TL, ay, bw2, bh2, 3);
+  noStroke(); fill(INK);
+  textAlign(CENTER, CENTER); textSize(11);
+  text(sim.running ? 'pause' : 'play', TL + bw2 / 2, ay + bh2 / 2);
+  playBtn = { _x: TL, _y: ay, _w: bw2, _h: bh2 };
+
+  stroke(INK); strokeWeight(1.5); fill(BG);
+  rect(TL + bw2 + 10, ay, bw2, bh2, 3);
+  noStroke(); fill(INK);
+  textAlign(CENTER, CENTER); textSize(11);
+  text('reset', TL + bw2 + 10 + bw2 / 2, ay + bh2 / 2);
+  resetBtn = { _x: TL + bw2 + 10, _y: ay, _w: bw2, _h: bh2 };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAWING — END SUMMARY
+// ═══════════════════════════════════════════════════════════════════════════
+function drawSummary() {
+  const ox = TL + 14, oy = TT + TH * 0.22;
+  const ow = TW - 28, oh = TH * 0.52;
+
+  fill(245, 240, 232, 235); noStroke();
+  rect(ox, oy, ow, oh, 6);
+
+  fill(INK); noStroke();
+  textFont('Courier New');
+  textAlign(CENTER, CENTER); textSize(12);
+  text('all drained!', ox + ow / 2, oy + 26);
+
+  const total    = sim.initialBase + sim.totalIn;
+  const baseFrac = total > 0 ? sim.initialBase / total : 1;
+  const intFrac  = 1 - baseFrac;
+
+  const barW = ow - 24, barH = 28;
+  const bx = ox + 12, by = oy + 50;
+
+  fill(C_BASE); noStroke();
+  rect(bx, by, barW * baseFrac, barH, 3, 0, 0, 3);
+  fill(C_INT);
+  rect(bx + barW * baseFrac, by, barW * intFrac, barH, 0, 3, 3, 0);
+  stroke(INK); strokeWeight(1); noFill();
+  rect(bx, by, barW, barH, 3);
+
+  fill(INK); noStroke(); textSize(10);
+  textAlign(LEFT,  TOP); text(`original ${round(baseFrac * 100)}%`, bx, by + barH + 8);
+  textAlign(RIGHT, TOP); text(`interest ${round(intFrac  * 100)}%`, bx + barW, by + barH + 8);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// p5 LIFECYCLE
+// ═══════════════════════════════════════════════════════════════════════════
+function setup() {
+  createCanvas(W, H);
+  sim = makeSim();
+}
+
+function draw() {
+  background(BG);
+
+  // Push slider values into sim each frame
+  sim.kIn  = sliders.faucet.val;
+  sim.kOut = sliders.drain.val;
+
+  if (sim.running) {
+    stepSim();
+    stepParticles();
+  }
+
+  drawFaucetPipe();
+  drawDrainPipe();
+  drawTank();
+  drawParticles();
+  drawControls();
+  if (sim.done) drawSummary();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUT
+// ═══════════════════════════════════════════════════════════════════════════
+function inBtn(b) {
+  return b._x !== undefined &&
+    mouseX > b._x && mouseX < b._x + b._w &&
+    mouseY > b._y && mouseY < b._y + b._h;
+}
+
+function sliderThumbX(s) {
+  return s.x + ((s.val - s.min) / (s.max - s.min)) * s.w;
+}
+
+function mousePressed() {
+  // Slider grab
+  for (const s of Object.values(sliders)) {
+    if (dist(mouseX, mouseY, sliderThumbX(s), s.y) < 12) {
+      dragging = s;
+      return;
+    }
+  }
+
+  // Mode buttons
+  for (const btn of MODE_BTNS) {
+    if (inBtn(btn)) { sim.mode = btn.id; return; }
+  }
+
+  // Play / Reset
+  if (inBtn(playBtn)  && !sim.done) { sim.running = !sim.running; return; }
+  if (inBtn(resetBtn)) {
+    sim = makeSim();
+    sim.kIn  = sliders.faucet.val;
+    sim.kOut = sliders.drain.val;
+    fParts = []; dParts = [];
+  }
+}
+
+function mouseDragged() {
+  if (!dragging) return;
+  const s = dragging;
+  const frac = constrain((mouseX - s.x) / s.w, 0, 1);
+  s.val = s.min + frac * (s.max - s.min);
+}
+
+function mouseReleased() {
+  dragging = null;
+}
+</script>
+</body>
+</html>
